@@ -11,8 +11,18 @@ from flask import Flask, render_template, request, jsonify, send_file
 import webbrowser
 import cv2
 import numpy as np
+import shutil
 
-app = Flask(__name__)
+# Configure Flask to look for templates in the same directory as this file
+template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
+print(f"DEBUG: template_dir={template_dir}")
+if os.path.exists(template_dir):
+    print(f"DEBUG: template_dir exists")
+    print(f"DEBUG: contents: {os.listdir(template_dir)}")
+else:
+    print(f"DEBUG: template_dir DOES NOT EXIST")
+
+app = Flask(__name__, template_folder=template_dir)
 
 # Global state
 class ScanState:
@@ -139,6 +149,10 @@ def scan_task(folder_path, mode='duplicate'):
         # Step 1: Collect files
         files = []
         for root, _, filenames in os.walk(folder_path):
+            # Skip _trash_bin folder
+            if '_trash_bin' in root.split(os.sep):
+                continue
+                
             for filename in filenames:
                 if filename.startswith('.'): continue
                 if os.path.splitext(filename)[1].lower() in valid_extensions:
@@ -146,7 +160,6 @@ def scan_task(folder_path, mode='duplicate'):
         
         total = len(files)
         hashes = defaultdict(list)
-        blur_list = []
         
         to_process = []
         cached_results = []
@@ -187,8 +200,6 @@ def scan_task(folder_path, mode='duplicate'):
             processed_count = 0
             
             with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-                # Need to pass mode to worker? process_one_image takes mode
-                # Use lambda or functools.partial? No, just helper
                 future_to_file = {executor.submit(process_one_image, f, mode): f for f in to_process}
                 
                 for future in concurrent.futures.as_completed(future_to_file):
@@ -229,9 +240,10 @@ def scan_task(folder_path, mode='duplicate'):
         # Step 5: Process Results based on Mode
         state.progress_msg = "正在整理结果..."
         
-        final_results = []
+        final_results = {} # Will hold the final response object
         
         if mode == 'duplicate':
+            similar_groups = []
             for data in cached_results:
                 img_info = ImageInfo(data)
                 if img_info.phash:
@@ -241,27 +253,28 @@ def scan_task(folder_path, mode='duplicate'):
                 if len(img_list) > 1:
                     group_data = [img.to_dict() for img in img_list]
                     group_data.sort(key=lambda x: (x['width'] * x['height'], x['size']), reverse=True)
-                    final_results.append({
-                        'hash': hash_str,
-                        'images': group_data,
-                        'type': 'group'
-                    })
-            state.progress_msg = f"扫描完成，发现 {len(final_results)} 组重复图片"
+                    similar_groups.append(group_data)
+            
+            final_results = {'similar_groups': similar_groups}
+            state.progress_msg = f"扫描完成，发现 {len(similar_groups)} 组重复图片"
             
         elif mode == 'blur':
+            blur_images = []
             for data in cached_results:
                 img_info = ImageInfo(data)
                 if img_info.blur_score < 100: # Threshold for blur. <100 is usually blurry
-                    final_results.append(img_info.to_dict())
+                    blur_images.append(img_info.to_dict())
             
             # Sort by blur score (ascending = most blurry first)
-            final_results.sort(key=lambda x: x['blur_score'])
-            state.progress_msg = f"扫描完成，发现 {len(final_results)} 张模糊图片"
+            blur_images.sort(key=lambda x: x['blur_score'])
+            final_results = {'blur_images': blur_images}
+            state.progress_msg = f"扫描完成，发现 {len(blur_images)} 张模糊图片"
 
-        state.results = final_results
+        state.results = final_results # Now state.results is a dict
         
     except Exception as e:
         state.progress_msg = f"错误: {str(e)}"
+        print(e)
     finally:
         state.scanning = False
 
@@ -269,13 +282,32 @@ def scan_task(folder_path, mode='duplicate'):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"Error: {e}", 500
 
 @app.route('/api/scan', methods=['POST'])
 def start_scan():
     data = request.json
     folder_path = data.get('path')
-    mode = data.get('mode', 'duplicate') # Default to duplicate
+    # frontend sends booleans: find_similar, find_blur. For now we support one mode at a time or logic needs update.
+    # The legacy code supported 'mode' param. The new frontend sends flags.
+    # Let's adapt: if find_blur is true, run blur mode, else duplicate mode.
+    # Or run both? The legacy logic ran one task.
+    # For simplicity, let's stick to 'mode' if possible, or infer it.
+    
+    # Actually, the frontend code sends: path, delete_raw, find_similar, find_blur.
+    # But startScan in frontend uses: body: JSON.stringify({ path: scanPath.value, ...settings })
+    # So we receive find_similar=true/false.
+    
+    mode = 'duplicate'
+    if data.get('find_blur'):
+        mode = 'blur'
+    # Prioritize blur if both selected? Or duplicate?
+    # Let's say duplicate is default.
     
     if not folder_path or not os.path.exists(folder_path):
         return jsonify({'error': '无效的文件夹路径'}), 400
@@ -284,6 +316,8 @@ def start_scan():
         return jsonify({'error': '扫描正在进行中'}), 400
     
     state.stop_flag = False
+    
+    # Run scan in thread
     thread = threading.Thread(target=scan_task, args=(folder_path, mode))
     thread.daemon = True
     thread.start()
@@ -292,20 +326,13 @@ def start_scan():
 
 @app.route('/api/status')
 def get_status():
-    return jsonify({
+    response = {
         'scanning': state.scanning,
-        'message': state.progress_msg,
-        'count': len(state.results),
-        'mode': state.mode
-    })
-
-@app.route('/api/results')
-def get_results():
-    return jsonify({
-        'mode': state.mode,
-        'data': state.results
-    })
-
+        'message': state.progress_msg
+    }
+    if not state.scanning and state.results:
+        response['results'] = state.results
+    return jsonify(response)
 
 @app.route('/api/image')
 def get_image():
@@ -314,45 +341,81 @@ def get_image():
         return "File not found", 404
     return send_file(path)
 
+import shutil
+
+# ... (rest of imports)
+
 @app.route('/api/delete', methods=['POST'])
 def delete_images():
     data = request.json
-    paths = data.get('paths', [])
-    deleted = []
+    # Frontend sends { files: [...] }
+    paths = data.get('files', [])
+    deleted_files = []
     errors = []
     
+    # Create trash directory if not exists
+    # We will create a '_trash_bin' in the folder where the first file is located
+    # Or in the scanned folder. We have state.folder_path
+    
+    trash_dir = os.path.join(state.folder_path, '_trash_bin')
+    if not os.path.exists(trash_dir):
+        try:
+            os.makedirs(trash_dir)
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'无法创建垃圾桶文件夹: {str(e)}'})
+            
     for path in paths:
         try:
             if os.path.exists(path):
-                os.remove(path) # Permanently delete. Or send to trash?
-                # User asked for delete. Let's do permanent delete for now as standard python behavior, 
-                # but maybe send2trash is safer? 
-                # For this task, os.remove is standard.
-                deleted.append(path)
+                # Move to trash_dir
+                filename = os.path.basename(path)
+                dest = os.path.join(trash_dir, filename)
+                
+                # Handle duplicate names in trash
+                if os.path.exists(dest):
+                    base, ext = os.path.splitext(filename)
+                    counter = 1
+                    while os.path.exists(dest):
+                        dest = os.path.join(trash_dir, f"{base}_{counter}{ext}")
+                        counter += 1
+                
+                shutil.move(path, dest)
+                deleted_files.append(path)
         except Exception as e:
             errors.append({'path': path, 'error': str(e)})
             
-    return jsonify({'deleted': deleted, 'errors': errors})
+    return jsonify({'success': True, 'deleted_count': len(deleted_files), 'deleted_files': deleted_files, 'errors': errors})
 
 @app.route('/api/open_folder', methods=['POST'])
 def open_folder():
     # Use tkinter to ask for directory
-    import tkinter as tk
-    from tkinter import filedialog
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        
+        # Create a hidden root window
+        root = tk.Tk()
+        root.withdraw()
+        
+        # Bring to front (hacky on Windows)
+        root.attributes('-topmost', True)
+        
+        folder_path = filedialog.askdirectory()
+        
+        root.destroy()
+        if not folder_path:
+             return jsonify({'error': '未选择文件夹'})
+        return jsonify({'path': folder_path})
+    except Exception as e:
+        return jsonify({'error': f'无法打开选择框: {str(e)}'})
+
+def main():
+    # Determine if running in a bundle or live
+    # If we want to open browser
+    url = 'http://127.0.0.1:5000'
+    threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     
-    # Create a hidden root window
-    root = tk.Tk()
-    root.withdraw()
-    
-    # Bring to front (hacky on Windows)
-    root.attributes('-topmost', True)
-    
-    folder_path = filedialog.askdirectory()
-    
-    root.destroy()
-    return jsonify({'path': folder_path})
+    app.run(host='127.0.0.1', port=5000, debug=True, use_reloader=False)
 
 if __name__ == '__main__':
-    # Open browser automatically
-    webbrowser.open('http://127.0.0.1:5000')
-    app.run(debug=True, use_reloader=False)
+    main()

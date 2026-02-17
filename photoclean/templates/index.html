@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能图片清理工具</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .image-card {
+            transition: all 0.3s ease;
+        }
+        .image-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #c1c1c1;
+            border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #a8a8a8;
+        }
+        .loading-spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3b82f6;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+{% raw %}
+    <div id="app" class="container mx-auto px-4 py-8">
+        <!-- 头部区域 -->
+        <header class="mb-8 text-center">
+            <h1 class="text-3xl font-bold text-gray-800 mb-2">
+                <i class="fas fa-images text-blue-500 mr-2"></i>智能图片清理工具
+            </h1>
+            <p class="text-gray-600">快速扫描并清理相似或模糊的图片</p>
+        </header>
+
+        <!-- 主要操作区 -->
+        <div class="bg-white rounded-xl shadow-sm p-6 mb-8">
+            <div class="flex flex-col md:flex-row gap-4 items-center justify-center">
+                <div class="flex-1 w-full md:w-auto">
+                    <div class="relative">
+                        <input type="text" 
+                               v-model="scanPath" 
+                               placeholder="请输入或选择文件夹路径"
+                               class="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all">
+                        <i class="fas fa-folder absolute left-3 top-3 text-gray-400"></i>
+                    </div>
+                </div>
+                <div class="flex gap-2">
+                    <button @click="openFolderDialog" 
+                            class="px-6 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors flex items-center gap-2">
+                        <i class="fas fa-folder-open"></i> 选择文件夹
+                    </button>
+                    <button @click="startScan" 
+                            :disabled="isScanning || !scanPath"
+                            class="px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                        <i class="fas" :class="isScanning ? 'fa-spinner fa-spin' : 'fa-search'"></i>
+                        {{ isScanning ? (progressMessage || '扫描中...') : '开始扫描' }}
+                    </button>
+                </div>
+            </div>
+
+            <!-- 扫描设置 -->
+            <div class="mt-6 border-t pt-4">
+                <div class="flex flex-wrap gap-6 justify-center text-sm text-gray-600">
+                    <label class="flex items-center gap-2 cursor-pointer hover:text-gray-800">
+                        <input type="checkbox" v-model="settings.find_similar" class="rounded text-blue-500 focus:ring-blue-500">
+                        <span>查找相似图片</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer hover:text-gray-800">
+                        <input type="checkbox" v-model="settings.find_blur" class="rounded text-blue-500 focus:ring-blue-500">
+                        <span>查找模糊图片</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- 扫描结果区域 -->
+        <div v-if="results" class="space-y-8">
+            <!-- 相似图片组 -->
+            <div v-if="results.similar_groups && results.similar_groups.length > 0" class="bg-white rounded-xl shadow-sm p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold text-gray-800 flex items-center gap-2">
+                        <i class="fas fa-clone text-indigo-500"></i> 相似图片组 ({{ results.similar_groups.length }})
+                    </h2>
+                    <button @click="autoSelectSimilar" class="px-6 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg transition-colors flex items-center gap-2 shadow-sm hover:shadow-md font-medium">
+                        <i class="fas fa-magic"></i> 自动选择建议删除
+                    </button>
+                </div>
+                <div class="space-y-8">
+                    <div v-for="(group, gIndex) in results.similar_groups" :key="gIndex" class="border rounded-lg p-4 bg-gray-50">
+                        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                            <div v-for="(img, iIndex) in group" :key="iIndex" 
+                                 class="image-card relative group bg-white p-2 rounded-lg border cursor-pointer"
+                                 :class="{'ring-2 ring-red-500': selectedFiles.has(img.path)}"
+                                 @click="toggleSelection(img.path)">
+                                <div class="aspect-w-16 aspect-h-12 mb-2 bg-gray-100 rounded overflow-hidden relative">
+                                    <img :src="'/api/image?path=' + encodeURIComponent(img.path)" 
+                                         class="object-contain w-full h-48" 
+                                         loading="lazy">
+                                    <div class="absolute top-2 right-2" v-if="selectedFiles.has(img.path)">
+                                        <div class="bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center shadow-md">
+                                            <i class="fas fa-check text-xs"></i>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="text-xs text-gray-600 space-y-1">
+                                    <div class="truncate" :title="getFileName(img.path)">{{ getFileName(img.path) }}</div>
+                                    <div class="flex justify-between text-gray-500">
+                                        <span>{{ formatSize(img.size) }}</span>
+                                        <span>{{ img.width }}x{{ img.height }}</span>
+                                    </div>
+                                    <div class="text-gray-400 text-[10px]">{{ img.time }}</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 模糊图片 -->
+            <div v-if="results.blur_images && results.blur_images.length > 0" class="bg-white rounded-xl shadow-sm p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold text-gray-800 flex items-center gap-2">
+                        <i class="fas fa-eye-slash text-orange-500"></i> 模糊图片 ({{ results.blur_images.length }})
+                    </h2>
+                    <button @click="selectAllBlur" class="text-sm text-blue-500 hover:text-blue-600 font-medium">
+                        全选模糊图片
+                    </button>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                    <div v-for="(img, index) in results.blur_images" :key="index" 
+                         class="image-card relative group bg-white p-2 rounded-lg border cursor-pointer"
+                         :class="{'ring-2 ring-red-500': selectedFiles.has(img.path)}"
+                         @click="toggleSelection(img.path)">
+                        <div class="aspect-w-16 aspect-h-12 mb-2 bg-gray-100 rounded overflow-hidden relative">
+                            <img :src="'/api/image?path=' + encodeURIComponent(img.path)" 
+                                 class="object-contain w-full h-48" 
+                                 loading="lazy">
+                            <div class="absolute top-2 right-2" v-if="selectedFiles.has(img.path)">
+                                <div class="bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center shadow-md">
+                                    <i class="fas fa-check text-xs"></i>
+                                </div>
+                            </div>
+                            <div class="absolute bottom-2 left-2 bg-black/50 text-white text-xs px-2 py-1 rounded">
+                                清晰度: {{ img.blur_score.toFixed(1) }}
+                            </div>
+                        </div>
+                        <div class="text-xs text-gray-600 space-y-1">
+                            <div class="truncate" :title="getFileName(img.path)">{{ getFileName(img.path) }}</div>
+                            <div class="flex justify-between text-gray-500">
+                                <span>{{ formatSize(img.size) }}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 底部操作栏 -->
+            <div v-if="selectedFiles.size > 0" class="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-white rounded-full shadow-lg px-8 py-4 flex items-center gap-6 border border-gray-100 z-50">
+                <div class="text-gray-700 font-medium">
+                    已选择 <span class="text-red-500 font-bold text-lg">{{ selectedFiles.size }}</span> 张图片
+                </div>
+                <button @click="deleteSelected" 
+                        class="px-6 py-2 bg-red-500 hover:bg-red-600 text-white rounded-full transition-colors flex items-center gap-2 shadow-md hover:shadow-lg">
+                    <i class="fas fa-trash-restore"></i> 移至垃圾桶(_trash_bin)
+                </button>
+                <button @click="selectedFiles.clear()" 
+                        class="text-gray-500 hover:text-gray-700 transition-colors">
+                    <i class="fas fa-times"></i> 取消
+                </button>
+            </div>
+        </div>
+
+        <!-- 状态提示 -->
+        <div v-if="message" 
+             class="fixed top-6 right-6 px-6 py-3 rounded-lg shadow-lg transform transition-all duration-300 z-50 flex items-center gap-3"
+             :class="messageType === 'success' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'">
+            <i class="fas" :class="messageType === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'"></i>
+            {{ message }}
+        </div>
+    </div>
+{% endraw %}
+
+    <script>
+        const { createApp, ref, reactive } = Vue
+
+        createApp({
+            setup() {
+                const scanPath = ref('')
+                const isScanning = ref(false)
+                const results = ref(null)
+                const selectedFiles = reactive(new Set())
+                const message = ref('')
+                const messageType = ref('success')
+                const progressMessage = ref('')
+                const settings = reactive({
+                    find_similar: true,
+                    find_blur: false
+                })
+
+                // 获取文件名
+                const getFileName = (path) => {
+                    return path.split(/[\\/]/).pop()
+                }
+
+                // 格式化文件大小
+                const formatSize = (bytes) => {
+                    if (bytes === 0) return '0 B'
+                    const k = 1024
+                    const sizes = ['B', 'KB', 'MB', 'GB']
+                    const i = Math.floor(Math.log(bytes) / Math.log(k))
+                    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+                }
+
+                // 显示消息提示
+                const showMessage = (msg, type = 'success') => {
+                    message.value = msg
+                    messageType.value = type
+                    setTimeout(() => {
+                        message.value = ''
+                    }, 3000)
+                }
+
+                // 打开文件夹选择框
+                const openFolderDialog = async () => {
+                    try {
+                        const response = await fetch('/api/open_folder', { method: 'POST' })
+                        const data = await response.json()
+                        if (data.path) {
+                            scanPath.value = data.path
+                        } else if (data.error) {
+                            showMessage(data.error, 'error')
+                        }
+                    } catch (e) {
+                        showMessage('无法打开选择框，请手动输入路径', 'error')
+                    }
+                }
+
+                // 开始扫描
+                const startScan = async () => {
+                    if (!scanPath.value) return
+                    
+                    isScanning.value = true
+                    results.value = null
+                    selectedFiles.clear()
+                    progressMessage.value = '准备开始...'
+
+                    try {
+                        const response = await fetch('/api/scan', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                path: scanPath.value,
+                                ...settings
+                            })
+                        })
+                        const data = await response.json()
+                        
+                        if (data.error) {
+                            showMessage(data.error, 'error')
+                            isScanning.value = false
+                            return
+                        }
+                        
+                        // Start polling
+                        const poll = async () => {
+                            try {
+                                const statusRes = await fetch('/api/status')
+                                const status = await statusRes.json()
+                                
+                                if (status.scanning) {
+                                    progressMessage.value = status.message
+                                    setTimeout(poll, 500)
+                                } else {
+                                    isScanning.value = false
+                                    progressMessage.value = ''
+                                    
+                                    if (status.results) {
+                                        results.value = status.results
+                                        const r = status.results
+                                        
+                                        if (r.raw_deleted > 0) {
+                                            showMessage(`已自动清理 ${r.raw_deleted} 个RAW文件`)
+                                        } else if ((!r.similar_groups || r.similar_groups.length === 0) && 
+                                                 (!r.blur_images || r.blur_images.length === 0)) {
+                                            showMessage('未发现需清理的图片')
+                                        }
+                                    } else if (status.message) {
+                                        showMessage(status.message, status.message.includes('错误') ? 'error' : 'success')
+                                    }
+                                }
+                            } catch (e) {
+                                isScanning.value = false
+                                showMessage('获取进度失败: ' + e.message, 'error')
+                            }
+                        }
+                        
+                        poll()
+
+                    } catch (e) {
+                        showMessage('扫描出错: ' + e.message, 'error')
+                        isScanning.value = false
+                    }
+                }
+
+                // 切换选择状态
+                const toggleSelection = (path) => {
+                    if (selectedFiles.has(path)) {
+                        selectedFiles.delete(path)
+                    } else {
+                        selectedFiles.add(path)
+                    }
+                }
+
+                // 自动选择相似图片
+                const autoSelectSimilar = () => {
+                    if (!results.value?.similar_groups) return
+                    
+                    results.value.similar_groups.forEach(group => {
+                        // 1. 优先检查文件名包含 "副本", "copy", "(1)", " - 副本" 等特征的文件
+                        // 2. 如果没有特征，则保留最早创建的文件 (mtime 最小)
+                        // 3. 如果时间相同，保留文件名最短的
+                        
+                        const copyPatterns = [/副本/, /copy/i, /\(\d+\)/, /_\d+$/];
+                        
+                        // 找出肯定是副本的文件
+                        const definiteCopies = [];
+                        const others = [];
+                        
+                        group.forEach(img => {
+                            const name = getFileName(img.path);
+                            const isCopy = copyPatterns.some(p => p.test(name));
+                            if (isCopy) {
+                                definiteCopies.push(img);
+                            } else {
+                                others.push(img);
+                            }
+                        });
+                        
+                        if (others.length > 0) {
+                            // 如果有非副本文件，保留其中最好的一个（最早的，或者文件名最短的）
+                            // 选中所有副本文件
+                            definiteCopies.forEach(img => selectedFiles.add(img.path));
+                            
+                            // 对 others 进行排序，保留 "最好" 的一个，选中其余的
+                            // 排序规则：创建时间越早越好，文件名越短越好
+                            others.sort((a, b) => {
+                                if (Math.abs(a.mtime - b.mtime) > 10) { // 10秒差异视为不同
+                                    return a.mtime - b.mtime; // 时间升序，早的在前
+                                }
+                                return getFileName(a.path).length - getFileName(b.path).length; // 长度升序，短的在前
+                            });
+                            
+                            // 保留 others[0]，选中 others[1...]
+                            for (let i = 1; i < others.length; i++) {
+                                selectedFiles.add(others[i].path);
+                            }
+                        } else {
+                            // 如果全都是 "副本" 或者全都没有特征
+                            // 使用默认策略：保留最早的，文件名最短的
+                            const sorted = [...group].sort((a, b) => {
+                                // 优先保留非副本特征少的（虽然这里大家都有或都没有，但还是尝试区分）
+                                const aName = getFileName(a.path);
+                                const bName = getFileName(b.path);
+                                const aIsCopy = copyPatterns.some(p => p.test(aName));
+                                const bIsCopy = copyPatterns.some(p => p.test(bName));
+                                
+                                if (aIsCopy !== bIsCopy) return aIsCopy ? 1 : -1; // 非副本在前
+                                
+                                if (Math.abs(a.mtime - b.mtime) > 10) {
+                                    return a.mtime - b.mtime; // 早的在前
+                                }
+                                return aName.length - bName.length; // 短的在前
+                            });
+                            
+                            // 保留 sorted[0]，选中其余
+                            for (let i = 1; i < sorted.length; i++) {
+                                selectedFiles.add(sorted[i].path);
+                            }
+                        }
+                    })
+                    showMessage(`已自动选择 ${selectedFiles.size} 张建议删除的图片`)
+                }
+
+                // 全选模糊图片
+                const selectAllBlur = () => {
+                    if (!results.value?.blur_images) return
+                    results.value.blur_images.forEach(img => {
+                        selectedFiles.add(img.path)
+                    })
+                }
+
+                // 删除选中文件
+                const deleteSelected = async () => {
+                    if (selectedFiles.size === 0) return
+                    
+                    const confirmMsg = `我们将把选中的 ${selectedFiles.size} 张图片移动到当前扫描目录下的 "_trash_bin" 文件夹中。\n\n请放心，我们不会直接删除您的文件。\n您可以随时进入该文件夹查看，并由您自己决定后续如何处理（保留或永久删除）。`
+                    if (!confirm(confirmMsg)) return
+
+                    try {
+                        const response = await fetch('/api/delete', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                files: Array.from(selectedFiles)
+                            })
+                        })
+                        const data = await response.json()
+                        
+                        if (data.success) {
+                            showMessage(`已将 ${data.deleted_count} 张图片安全移动到 "_trash_bin" 文件夹，您可以随时查看`)
+                            // 从结果中移除已删除的图片
+                            const deletedSet = new Set(data.deleted_files)
+                            
+                            if (results.value.similar_groups) {
+                                results.value.similar_groups = results.value.similar_groups
+                                    .map(group => group.filter(img => !deletedSet.has(img.path)))
+                                    .filter(group => group.length > 1)
+                            }
+                            
+                            if (results.value.blur_images) {
+                                results.value.blur_images = results.value.blur_images
+                                    .filter(img => !deletedSet.has(img.path))
+                            }
+                            
+                            selectedFiles.clear()
+                        } else {
+                            showMessage('删除失败: ' + data.error, 'error')
+                        }
+                    } catch (e) {
+                        showMessage('操作出错: ' + e.message, 'error')
+                    }
+                }
+
+                return {
+                    scanPath,
+                    isScanning,
+                    results,
+                    selectedFiles,
+                    message,
+                    messageType,
+                    progressMessage,
+                    settings,
+                    getFileName,
+                    formatSize,
+                    openFolderDialog,
+                    startScan,
+                    toggleSelection,
+                    autoSelectSimilar,
+                    selectAllBlur,
+                    deleteSelected
+                }
+            }
+        }).mount('#app')
+    </script>
+</body>
+</html>
