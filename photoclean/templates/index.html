@@ -81,16 +81,33 @@
                 </div>
             </div>
 
-            <!-- 扫描设置 -->
-            <div class="mt-6 border-t pt-4">
-                <div class="flex flex-wrap gap-6 justify-center text-sm text-gray-600">
-                    <label class="flex items-center gap-2 cursor-pointer hover:text-gray-800">
-                        <input type="checkbox" v-model="settings.find_similar" class="rounded text-blue-500 focus:ring-blue-500">
-                        <span>查找相似图片</span>
+        </div>
+
+        <!-- Scan Settings -->
+        <div class="bg-white rounded-xl shadow-sm p-6 mb-8">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4 flex items-center gap-2">
+                <i class="fas fa-sliders-h text-blue-500"></i>
+                扫描选项
+            </h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="space-y-3">
+                    <label class="flex items-center gap-3 p-3 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-colors"
+                           :class="{'ring-2 ring-blue-500 bg-blue-50': settings.scanMode === 'duplicate'}">
+                        <input type="radio" v-model="settings.scanMode" value="duplicate" class="w-5 h-5 text-blue-600 focus:ring-blue-500">
+                        <div>
+                            <span class="font-medium text-gray-700">查找重复图片</span>
+                            <p class="text-sm text-gray-500">查找内容完全相同的图片 (基于 pHash 算法)</p>
+                        </div>
                     </label>
-                    <label class="flex items-center gap-2 cursor-pointer hover:text-gray-800">
-                        <input type="checkbox" v-model="settings.find_blur" class="rounded text-blue-500 focus:ring-blue-500">
-                        <span>查找模糊图片</span>
+                </div>
+                <div class="space-y-3">
+                    <label class="flex items-center gap-3 p-3 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-colors"
+                           :class="{'ring-2 ring-blue-500 bg-blue-50': settings.scanMode === 'blur'}">
+                        <input type="radio" v-model="settings.scanMode" value="blur" class="w-5 h-5 text-blue-600 focus:ring-blue-500">
+                        <div>
+                            <span class="font-medium text-gray-700">查找模糊图片</span>
+                            <p class="text-sm text-gray-500">识别模糊不清的照片</p>
+                        </div>
                     </label>
                 </div>
             </div>
@@ -101,12 +118,23 @@
             <!-- 相似图片组 -->
             <div v-if="results.similar_groups && results.similar_groups.length > 0" class="bg-white rounded-xl shadow-sm p-6">
                 <div class="flex justify-between items-center mb-6">
-                    <h2 class="text-xl font-bold text-gray-800 flex items-center gap-2">
-                        <i class="fas fa-clone text-indigo-500"></i> 相似图片组 ({{ results.similar_groups.length }})
+                    <h2 class="text-xl font-semibold text-gray-800 flex items-center gap-2">
+                        <i class="fas fa-images text-blue-500"></i>
+                        重复图片分组
+                        <span class="text-sm font-normal text-gray-500 ml-2">
+                            (共 {{ results.similar_groups.length }} 组)
+                        </span>
                     </h2>
-                    <button @click="autoSelectSimilar" class="px-6 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg transition-colors flex items-center gap-2 shadow-sm hover:shadow-md font-medium">
-                        <i class="fas fa-magic"></i> 自动选择建议删除
-                    </button>
+                    <div class="flex items-center gap-3">
+                        <button @click="autoSelectSimilar" 
+                                class="px-5 py-2.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg transition-all flex items-center gap-2 shadow-sm hover:shadow text-sm font-medium">
+                            <i class="fas fa-magic"></i> 自动选择质量差的图片
+                        </button>
+                        <button @click="selectedFiles.clear()" 
+                                class="px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors text-sm">
+                            取消选择
+                        </button>
+                    </div>
                 </div>
                 <div class="space-y-8">
                     <div v-for="(group, gIndex) in results.similar_groups" :key="gIndex" class="border rounded-lg p-4 bg-gray-50">
@@ -216,8 +244,8 @@
                 const messageType = ref('success')
                 const progressMessage = ref('')
                 const settings = reactive({
-                    find_similar: true,
-                    find_blur: false
+                    scanMode: 'duplicate', // 'duplicate' or 'blur'
+                    delete_raw: false
                 })
 
                 // 获取文件名
@@ -271,9 +299,11 @@
                         const response = await fetch('/api/scan', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
+                            body: JSON.stringify({ 
                                 path: scanPath.value,
-                                ...settings
+                                find_blur: settings.scanMode === 'blur',
+                                find_similar: settings.scanMode === 'duplicate',
+                                delete_raw: settings.delete_raw
                             })
                         })
                         const data = await response.json()

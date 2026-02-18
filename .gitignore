@@ -38,6 +38,8 @@ ENV/
 # Project specific
 legacy/
 .dedup_cache.json
+setup.py
+_trash_bin/
 
 # C# / .NET
 bin/
