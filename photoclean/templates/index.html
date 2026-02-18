@@ -102,6 +102,16 @@
                 </div>
                 <div class="space-y-3">
                     <label class="flex items-center gap-3 p-3 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-colors"
+                           :class="{'ring-2 ring-blue-500 bg-blue-50': settings.scanMode === 'similar'}">
+                        <input type="radio" v-model="settings.scanMode" value="similar" class="w-5 h-5 text-blue-600 focus:ring-blue-500">
+                        <div>
+                            <span class="font-medium text-gray-700">查找相似图片</span>
+                            <p class="text-sm text-gray-500">查找内容相似的图片 (连拍、不同角度等,需要下载大模型 约1.1G)</p>
+                        </div>
+                    </label>
+                </div>
+                <div class="space-y-3">
+                    <label class="flex items-center gap-3 p-3 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-colors"
                            :class="{'ring-2 ring-blue-500 bg-blue-50': settings.scanMode === 'blur'}">
                         <input type="radio" v-model="settings.scanMode" value="blur" class="w-5 h-5 text-blue-600 focus:ring-blue-500">
                         <div>
@@ -290,6 +300,59 @@
                 const startScan = async () => {
                     if (!scanPath.value) return
                     
+                    // Check dependency for 'similar' mode
+                    if (settings.scanMode === 'similar') {
+                        try {
+                            const checkRes = await fetch('/api/check_dependency?name=sentence-transformers')
+                            const checkData = await checkRes.json()
+                            
+                            if (!checkData.installed) {
+                                if (confirm('“查找相似图片”功能需要安装额外的 AI 依赖库 (sentence-transformers)，是否立即安装？\n\n注意：安装可能需要几分钟时间，请保持网络连接。')) {
+                                    isScanning.value = true
+                                    progressMessage.value = '正在安装 AI 依赖库，请稍候...'
+                                    
+                                    const installRes = await fetch('/api/install_dependency', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ name: 'sentence-transformers' })
+                                    })
+                                    const installData = await installRes.json()
+                                    
+                                    if (!installData.success) {
+                                        showMessage('安装启动失败: ' + installData.error, 'error')
+                                        isScanning.value = false
+                                        return
+                                    }
+
+                                    // Poll installation status
+                                    while (true) {
+                                        await new Promise(r => setTimeout(r, 1000))
+                                        const statusRes = await fetch('/api/install_status')
+                                        const status = await statusRes.json()
+                                        
+                                        progressMessage.value = '正在安装: ' + status.message
+                                        
+                                        if (!status.installing) {
+                                            if (status.success) {
+                                                showMessage('安装成功！正在启动扫描...', 'success')
+                                                break
+                                            } else {
+                                                showMessage('安装失败: ' + status.error, 'error')
+                                                isScanning.value = false
+                                                return
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    return // User cancelled
+                                }
+                            }
+                        } catch (e) {
+                            showMessage('检查依赖失败: ' + e.message, 'error')
+                            return
+                        }
+                    }
+
                     isScanning.value = true
                     results.value = null
                     selectedFiles.clear()
@@ -302,7 +365,8 @@
                             body: JSON.stringify({ 
                                 path: scanPath.value,
                                 find_blur: settings.scanMode === 'blur',
-                                find_similar: settings.scanMode === 'duplicate',
+                                find_similar: settings.scanMode === 'similar', // Map 'similar' to 'find_similar' for backend
+                                find_duplicate: settings.scanMode === 'duplicate', // Backend default is duplicate if others false
                                 delete_raw: settings.delete_raw
                             })
                         })

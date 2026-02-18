@@ -13,6 +13,24 @@ import cv2
 import numpy as np
 import shutil
 
+# Lazy import for heavy ML libraries
+sentence_transformers = None
+util = None
+
+def get_model():
+    global sentence_transformers, util
+    if sentence_transformers is None:
+        try:
+            # Set model download path to local .models folder
+            os.environ['SENTENCE_TRANSFORMERS_HOME'] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.models')
+            
+            from sentence_transformers import SentenceTransformer, util as st_util
+            sentence_transformers = SentenceTransformer
+            util = st_util
+        except ImportError:
+            return None
+    return sentence_transformers('clip-ViT-B-32')
+
 # Configure Flask to look for templates in the same directory as this file
 template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 print(f"DEBUG: template_dir={template_dir}")
@@ -69,7 +87,7 @@ def process_one_image(path, mode='duplicate'):
             'error': None
         }
 
-        if mode == 'duplicate':
+        if mode == 'duplicate' or mode == 'similar':
             with Image.open(path) as img:
                 width, height = img.size
                 phash = imagehash.phash(img)
@@ -180,6 +198,9 @@ def scan_task(folder_path, mode='duplicate'):
                         if mode == 'duplicate' and 'phash' in c_data:
                             cached_results.append(c_data)
                             continue
+                        elif mode == 'similar' and 'phash' in c_data:
+                             cached_results.append(c_data)
+                             continue
                         elif mode == 'blur' and 'blur_score' in c_data:
                             cached_results.append(c_data)
                             continue
@@ -258,6 +279,94 @@ def scan_task(folder_path, mode='duplicate'):
             final_results = {'similar_groups': similar_groups}
             state.progress_msg = f"扫描完成，发现 {len(similar_groups)} 组重复图片"
             
+        elif mode == 'similar':
+            # Calculate embeddings using CLIP model
+            state.progress_msg = "正在加载 AI 模型 (首次运行可能需要几分钟下载)..."
+            
+            try:
+                model = get_model()
+                if model is None:
+                     state.progress_msg = "错误: 请安装 sentence-transformers 以使用此功能 (pip install sentence-transformers)"
+                     state.scanning = False
+                     return
+
+                # Collect valid images for embedding
+                valid_images = []
+                valid_paths = []
+                
+                total_imgs = len(cached_results)
+                state.progress_msg = f"正在计算特征向量 (共 {total_imgs} 张)..."
+                
+                # Batch process for better performance? 
+                # Or just loop. For < 1000 images, loop is fine.
+                # But we need PIL images.
+                
+                for i, data in enumerate(cached_results):
+                    if state.stop_flag: break
+                    try:
+                        img = Image.open(data['path']).convert('RGB')
+                        valid_images.append(img)
+                        valid_paths.append(data)
+                    except:
+                        pass
+                    
+                    if i % 10 == 0:
+                        state.progress_msg = f"正在读取图片: {i}/{total_imgs}"
+                
+                if not valid_images:
+                    state.scanning = False
+                    state.progress_msg = "没有找到有效图片"
+                    return
+
+                state.progress_msg = "正在进行 AI 推理..."
+                embeddings = model.encode(valid_images, convert_to_tensor=True, show_progress_bar=False)
+                
+                state.progress_msg = "正在聚类分析..."
+                
+                # Compute cosine similarity
+                # util.cos_sim returns a matrix
+                cosine_scores = util.cos_sim(embeddings, embeddings)
+                
+                # Cluster images
+                # Threshold for "same object, different angle"
+                # 0.85 is a good starting point for CLIP ViT-B-32
+                threshold = 0.85 
+                
+                visited = set()
+                similar_groups = []
+                
+                # Move tensor to cpu numpy for easy indexing
+                cosine_scores_np = cosine_scores.cpu().numpy()
+                
+                for i in range(len(valid_paths)):
+                    if i in visited: continue
+                    
+                    # Start a new group
+                    current_group = [ImageInfo(valid_paths[i])]
+                    visited.add(i)
+                    
+                    for j in range(i + 1, len(valid_paths)):
+                        if j in visited: continue
+                        
+                        score = cosine_scores_np[i][j]
+                        if score >= threshold:
+                            current_group.append(ImageInfo(valid_paths[j]))
+                            visited.add(j)
+                    
+                    if len(current_group) > 1:
+                        group_data = [img.to_dict() for img in current_group]
+                        # Sort by resolution/size
+                        group_data.sort(key=lambda x: (x['width'] * x['height'], x['size']), reverse=True)
+                        # Add similarity score info? Not needed for now.
+                        similar_groups.append(group_data)
+
+                final_results = {'similar_groups': similar_groups}
+                state.progress_msg = f"扫描完成，发现 {len(similar_groups)} 组相似图片"
+
+            except Exception as e:
+                print(f"AI Error: {e}")
+                state.progress_msg = f"AI 模型运行错误: {str(e)}"
+            
         elif mode == 'blur':
             blur_images = []
             for data in cached_results:
@@ -289,6 +398,89 @@ def index():
         traceback.print_exc()
         return f"Error: {e}", 500
 
+import subprocess
+
+# Installation State
+install_state = {
+    'installing': False,
+    'message': '',
+    'success': False,
+    'error': None
+}
+
+def install_task(package_name):
+    global install_state
+    install_state['installing'] = True
+    install_state['message'] = '正在初始化安装环境...'
+    install_state['success'] = False
+    install_state['error'] = None
+    
+    try:
+        # Use --no-cache-dir to avoid cache issues? No, cache is good.
+        # Use -v to get more verbose output for progress? Standard is fine.
+        process = subprocess.Popen(
+            [sys.executable, "-m", "pip", "install", package_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+            # Force unbuffered output for real-time updates
+            env={**os.environ, "PYTHONUNBUFFERED": "1"} 
+        )
+        
+        # Read output line by line
+        for line in process.stdout:
+            line = line.strip()
+            if line:
+                install_state['message'] = line
+        
+        process.wait()
+        
+        if process.returncode == 0:
+            install_state['success'] = True
+            install_state['message'] = '安装完成'
+        else:
+            install_state['success'] = False
+            install_state['error'] = f'安装失败 (退出代码 {process.returncode})'
+            install_state['message'] = f'安装失败 (退出代码 {process.returncode})'
+            
+    except Exception as e:
+        install_state['success'] = False
+        install_state['error'] = str(e)
+        install_state['message'] = f'发生错误: {str(e)}'
+    finally:
+        install_state['installing'] = False
+
+@app.route('/api/check_dependency', methods=['GET'])
+def check_dependency():
+    dep = request.args.get('name')
+    if dep == 'sentence-transformers':
+        try:
+            import sentence_transformers
+            return jsonify({'installed': True})
+        except ImportError:
+            return jsonify({'installed': False})
+    return jsonify({'installed': False})
+
+@app.route('/api/install_dependency', methods=['POST'])
+def install_dependency():
+    data = request.json
+    dep = data.get('name')
+    
+    if dep == 'sentence-transformers':
+        if install_state['installing']:
+            return jsonify({'success': False, 'error': '安装正在进行中，请稍候...'})
+
+        threading.Thread(target=install_task, args=(dep,), daemon=True).start()
+        return jsonify({'success': True, 'status': 'started'})
+            
+    return jsonify({'success': False, 'error': '不支持安装该依赖'})
+
+@app.route('/api/install_status', methods=['GET'])
+def get_install_status():
+    return jsonify(install_state)
+
 @app.route('/api/scan', methods=['POST'])
 def start_scan():
     data = request.json
@@ -304,10 +496,12 @@ def start_scan():
     # So we receive find_similar=true/false.
     
     mode = 'duplicate'
-    if data.get('find_blur'):
+    if data.get('find_similar'):
+        mode = 'similar'
+    elif data.get('find_blur'):
         mode = 'blur'
-    # Prioritize blur if both selected? Or duplicate?
-    # Let's say duplicate is default.
+    
+    # Default is duplicate if neither is true (though frontend radio should enforce one)
     
     if not folder_path or not os.path.exists(folder_path):
         return jsonify({'error': '无效的文件夹路径'}), 400
